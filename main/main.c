@@ -27,17 +27,43 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_sntp.h"
+#include "esp_wifi.h"
 #include "fonts.h"
 #include "photo.h"
 #include "leds.h"
 #include "jelly.h"
 
 static const char *TAG = "imsai_clock";
+
+// Why the chip last restarted, and whether the clock kept its time through it (asked for with "I" over USB serial)
+static const char *boot_reset_name = "?";
+static bool boot_time_kept;
+
+static const char *reset_name(esp_reset_reason_t r)
+{
+    switch (r) {
+    case ESP_RST_POWERON:   return "power-on (power was off, or the RESET button)";
+    case ESP_RST_EXT:       return "external reset pin";
+    case ESP_RST_SW:        return "software restart";
+    case ESP_RST_PANIC:     return "crash (panic)";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_WDT:       return "other watchdog";
+    case ESP_RST_DEEPSLEEP: return "wake from deep sleep";
+    case ESP_RST_BROWNOUT:  return "brown-out (supply voltage dipped)";
+    case ESP_RST_USB:       return "USB-triggered reset";
+    default:                return "unknown";
+    }
+}
 
 // Waveshare ESP32-S3-LCD-1.47B
 #define PIN_MOSI  45
@@ -554,6 +580,87 @@ static time_t build_time(void)                                     // the build 
     return mktime(&t);
 }
 
+// ------------------------------------------------------------------------------
+// Wi-Fi + SNTP: the board has no battery, so after a power cut it gets the time from the network.
+// The network name and password are stored in NVS (never in the source); tools\set_wifi.py sends them over USB serial.
+// ------------------------------------------------------------------------------
+#define NTP_SERVER "pool.ntp.org"
+static char wifi_ssid[33], wifi_pass[65];
+static const char *wifi_state = "not configured";
+static time_t last_sync = 0;                                       // UTC time of the last NTP sync (0: none since boot)
+static bool wifi_up;                                               // wifi_start() has run
+
+static void nvs_load_wifi(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    size_t n = sizeof wifi_ssid;
+    if (nvs_get_str(h, "ssid", wifi_ssid, &n) != ESP_OK) wifi_ssid[0] = 0;
+    n = sizeof wifi_pass;
+    if (nvs_get_str(h, "pass", wifi_pass, &n) != ESP_OK) wifi_pass[0] = 0;
+    nvs_close(h);
+}
+
+static void sntp_synced(struct timeval *tv)
+{
+    last_sync = tv->tv_sec;
+    ESP_LOGI(TAG, "NTP synced: %lld s since 1970 UTC", (long long)tv->tv_sec);
+}
+
+static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        if (wifi_ssid[0]) { wifi_state = "connecting"; esp_wifi_connect(); }
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (wifi_ssid[0]) {
+            wifi_event_sta_disconnected_t *d = data;
+            wifi_state = "disconnected, retrying";
+            ESP_LOGW(TAG, "WIFI disconnected (reason %d), retrying", d->reason);
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            esp_wifi_connect();
+        }
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        wifi_state = "connected";
+        ip_event_got_ip_t *e = data;
+        ESP_LOGI(TAG, "WIFI connected to \"%s\", IP " IPSTR, wifi_ssid, IP2STR(&e->ip_info.ip));
+        if (esp_sntp_enabled()) esp_sntp_stop();
+        esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+        esp_sntp_setservername(0, NTP_SERVER);
+        esp_sntp_set_time_sync_notification_cb(sntp_synced);
+        esp_sntp_init();                                           // asks again about once an hour
+    }
+}
+
+static void wifi_apply(void)                                       // use wifi_ssid/wifi_pass (empty ssid: stay disconnected)
+{
+    wifi_config_t wc = { 0 };
+    strlcpy((char *)wc.sta.ssid, wifi_ssid, sizeof wc.sta.ssid);
+    strlcpy((char *)wc.sta.password, wifi_pass, sizeof wc.sta.password);
+    wc.sta.threshold.authmode = wifi_pass[0] ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;   // WPA or better; open if no password
+    wc.sta.pmf_cfg.capable = true;
+    esp_wifi_disconnect();
+    esp_wifi_set_config(WIFI_IF_STA, &wc);
+    if (wifi_ssid[0]) { wifi_state = "connecting"; esp_wifi_connect(); }
+    else wifi_state = "not configured";
+}
+
+static void wifi_start(void)
+{
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t wic = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&wic));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));       // the credentials live in our own NVS keys
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    wifi_apply();
+    ESP_ERROR_CHECK(esp_wifi_start());
+    wifi_up = true;
+    ESP_LOGI(TAG, "WIFI started: %s%s%s", wifi_state, wifi_ssid[0] ? " to " : "", wifi_ssid);
+}
+
 static void dump_frame(void)                                       // "FB" row lines, then "END", all in hex
 {
     char *line = malloc(2 * W * 2 + 16);
@@ -596,6 +703,24 @@ static void poll_serial(void)                                      // called fro
                 nvs_save("tz", cfg_tz);
                 apply_tz();
                 ESP_LOGI(TAG, "Time zone set to %s", cfg_tz);
+            } else if (len >= 1 && buf[0] == 'W') {                // "W<ssid>\t<password>" saves and uses it; "W" alone forgets it
+                char *tab = memchr(buf + 1, '\t', len - 1);
+                if (tab) *tab = 0;
+                strlcpy(wifi_ssid, buf + 1, sizeof wifi_ssid);
+                strlcpy(wifi_pass, tab ? tab + 1 : "", sizeof wifi_pass);
+                nvs_save("ssid", wifi_ssid);
+                nvs_save("pass", wifi_pass);
+                ESP_LOGI(TAG, "WIFI saved network \"%s\" (%s password)", wifi_ssid, wifi_pass[0] ? "with" : "no");
+                if (wifi_up) wifi_apply();
+            } else if (len == 1 && buf[0] == 'I') {                // "I": report the last reset and the time
+                time_t t = time(NULL);
+                struct tm tm;
+                gmtime_r(&t, &tm);
+                ESP_LOGI(TAG, "INFO last reset: %s; time kept through it: %s; clock now %04d-%02d-%02d %02d:%02d:%02d UTC; up %d s; "
+                              "wifi: %s%s%s; last NTP sync: %s; free heap %u",
+                         boot_reset_name, boot_time_kept ? "YES" : "NO", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+                         tm.tm_min, tm.tm_sec, (int)(esp_timer_get_time() / 1000000), wifi_state, wifi_ssid[0] ? " / " : "", wifi_ssid,
+                         last_sync ? "yes" : "none yet", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
             } else if (len == 1 && buf[0] == 'D') {
                 wait_sent();
                 dump_frame();
@@ -698,6 +823,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ne);
     nvs_load();
+    nvs_load_wifi();
     apply_tz();
     ESP_LOGI(TAG, "Saved time zone: %s (nvs_flash_init: %s)", cfg_tz, esp_err_to_name(ne));
 
@@ -736,16 +862,22 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
     time_t bt = build_time(), t_boot = time(NULL);
+    esp_reset_reason_t rr = esp_reset_reason();
+    boot_reset_name = reset_name(rr);
+    boot_time_kept = t_boot >= bt;
     if (t_boot < bt) {                             // nothing has set the clock yet: start at the build time
         set_time_utc(bt);
         ESP_LOGI(TAG, "Clock was not set: starting at the build time");
     } else {
         ESP_LOGI(TAG, "Clock kept its time across the reset");
     }
+    ESP_LOGI(TAG, "Last reset: %s (code %d)", boot_reset_name, (int)rr);
     ESP_LOGI(TAG, "Free internal heap %u bytes, free PSRAM %u bytes", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     enter_show(SHOW_SCENE);                        // after a reset: the title scene first
+    wifi_start();                                  // after the screen is up; gets the time from NTP once connected
+    ESP_LOGI(TAG, "Free internal heap after Wi-Fi: %u bytes", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
     int64_t low_since = -1;                        // when the button went down (-1: it is up)
     bool armed = true;                             // one press = one change; re-armed when the button is released

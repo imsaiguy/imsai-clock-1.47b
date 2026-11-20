@@ -9,11 +9,15 @@ byte order R,G,B) shows which screen is up.
   3. Real-time clock HH:MM:SS (24 hour): glossy "jelly" digits, a different colour per position, in a red neon
      tube frame                                                                               LED blue
 
-Time (no Wi-Fi): the board has no battery-backed clock. Download with
+Time: the board has no battery-backed clock, so a power cut clears it. It gets the time from NTP over Wi-Fi (2.4 GHz only):
+    python tools\set_wifi.py COM9        (run it yourself; asks for the network name and the hidden password, which the
+                                          board keeps in its flash; "--forget" clears them)
+After a power cut the clock starts at the firmware's build time and jumps to the right time once Wi-Fi connects
+(it took about 30 s in a test). The time zone (daylight saving included) is set from this PC:
     powershell -ExecutionPolicy Bypass -File tools\flash.ps1 [-Port COM9] [-NoBuild]
-which builds, flashes and then sets the time and time zone (daylight saving included) from this PC over USB serial.
-The chip keeps the time from then on (it survived a reset; a real power cut was not tested and should lose it);
-set it again with  python tools\set_time.py COM9  (ESP-IDF Python: it has pyserial).
+builds, flashes, and sets the zone and the time over USB serial straight away; python tools\set_time.py COM9 does only the
+last part (ESP-IDF Python: it has pyserial). Flashing the merged image below erases the saved Wi-Fi settings: run set_wifi.py again.
+Serial commands (115200, USB): Z<tz>, T<epoch>, W<ssid><TAB><password>, I (status), D (dump the screen).
 
 Memory: the finished title scene and the neon background are drawn once at start-up into the 8 MB octal PSRAM
 (CONFIG_SPIRAM, sdkconfig.defaults), so changing screen is a copy. The display buffer is in internal RAM.
@@ -21,8 +25,8 @@ No graphics library: ESP-IDF v5.5.2 esp_lcd ST7789 driver only.
 
 Ready-to-flash image (any 1.47B board; replace COM9; hold BOOT while pressing RESET if it will not enter download mode):
   python -m esptool --chip esp32s3 -p COM9 -b 460800 write_flash 0x0 firmware\imsai_clock_merged_0x0.bin
-  SHA-256 9E8F4A97C7D58E95FD63C3C1AF32D86CBE3E75B4E62939949F4FC2D7AB978EFD
-  then set the time:  python tools\set_time.py COM9
+  SHA-256 A2CA814847F564DB401D5F66B2ABDBC079FBBF8AB74F24E00D08CDA1D74EF465
+  then:  python tools\set_wifi.py COM9   and   python tools\set_time.py COM9   (time zone)
 Screenshots read back from the board: assets\screen_title_scene.png, assets\screen_clock.png (3x enlarged).
 
 Source: main\main.c; generated data: main\photo.h (tools\gen_image.ps1), main\fonts.h (tools\gen_fonts.ps1),

@@ -1,6 +1,7 @@
-"""Set the clock's time zone and time from this PC over USB serial (without Wi-Fi/NTP).
+"""Set the clock's time zone and time from this PC over USB serial.
 Usage: python set_time.py COM9
-With Wi-Fi set up (set_wifi.py) the clock gets the time from NTP and this is not needed."""
+The time zone is saved in the board's flash. The time is only a first value: once Wi-Fi is set up (set_wifi.py)
+the board corrects it from NTP."""
 import sys, time, datetime
 import serial  # pyserial (comes with the ESP-IDF Python environment)
 sys.path.insert(0, __file__.rsplit("\\", 1)[0])
