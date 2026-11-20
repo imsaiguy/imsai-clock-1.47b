@@ -1,0 +1,7 @@
+build/
+sdkconfig
+sdkconfig.old
+__pycache__/
+*.mkv
+assets/masks.bin
+assets/mode_after_press1.png

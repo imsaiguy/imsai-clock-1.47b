@@ -1,0 +1,9 @@
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+# the jelly digit sprites and the photo are large: use the larger single-app layout
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# the 8 MB octal PSRAM holds the finished title scene and the clock's neon background
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
