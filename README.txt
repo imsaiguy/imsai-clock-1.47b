@@ -6,7 +6,7 @@ byte order R,G,B) shows which screen is up.
   1. "ImsaiGuy" title scene with a gold frame      LED green
   2. IMSAI 8080 front panel photo, its 44 LEDs animated from a recording of a real machine (30 fps, looping,
      it plays on in real time even while another screen is up)                                 LED red
-  3. Real-time clock HH:MM:SS (24 hour): glossy "jelly" digits, a different colour per position, in a red neon
+  3. Real-time clock H:MM:SS (12 hour, no AM/PM mark, blank instead of a leading zero): glossy "jelly" digits, a different colour per position, in a red neon
      tube frame                                                                               LED blue
 
 Time: the board has no battery-backed clock, so a power cut clears it. It gets the time from NTP over Wi-Fi (2.4 GHz only):
@@ -25,7 +25,7 @@ No graphics library: ESP-IDF v5.5.2 esp_lcd ST7789 driver only.
 
 Ready-to-flash image (any 1.47B board; replace COM9; hold BOOT while pressing RESET if it will not enter download mode):
   python -m esptool --chip esp32s3 -p COM9 -b 460800 write_flash 0x0 firmware\imsai_clock_merged_0x0.bin
-  SHA-256 A2CA814847F564DB401D5F66B2ABDBC079FBBF8AB74F24E00D08CDA1D74EF465
+  SHA-256 E656356320DFA92D462A596906ED7A2EB5F9912096EF3188BA9C2DEE38FB0187
   then:  python tools\set_wifi.py COM9   and   python tools\set_time.py COM9   (time zone)
 Screenshots read back from the board: assets\screen_title_scene.png, assets\screen_clock.png (3x enlarged).
 

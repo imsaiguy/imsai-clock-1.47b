@@ -462,7 +462,7 @@ static void draw_sprite(const jglyph_t *g, int cell_x, int top, int cell, bool g
     }
 }
 
-static void draw_time(const char *text)                            // text is "HH:MM:SS"
+static void draw_time(const char *text)                            // text is "HH:MM:SS" (' ' = empty cell)
 {
     target = fb;
     for (int y = band_y0(); y <= band_y1(); y++)                   // clean background for the whole digit band
@@ -471,8 +471,10 @@ static void draw_time(const char *text)                            // text is "H
         int x = clock_x0();
         for (int c = 0; c < CELLS; c++) {
             bool colon = cell_kind[c] == ':';
-            const jglyph_t *g = &jelly_glyphs[colon ? 10 : text[c] - '0'];
-            draw_sprite(g, x, clock_y0(), c, pass == 0);
+            if (text[c] != ' ') {                                  // a space leaves the cell empty (12-hour clock: no leading zero)
+                const jglyph_t *g = &jelly_glyphs[colon ? 10 : text[c] - '0'];
+                draw_sprite(g, x, clock_y0(), c, pass == 0);
+            }
             x += colon ? COLON_CELL_W : DIGIT_CELL_W;
         }
     }
@@ -753,8 +755,10 @@ static void draw_clock_now(time_t now)
 {
     struct tm tm;
     localtime_r(&now, &tm);
-    char text[9];
-    snprintf(text, sizeof text, "%02d:%02d:%02d", tm.tm_hour, tm.tm_min, tm.tm_sec);
+    char text[32];                                 // only the first 8 characters are used; the size just satisfies the compiler
+    int h12 = tm.tm_hour % 12;                     // 12-hour clock: 12:00:00 at midnight and noon, 1..12 otherwise
+    if (h12 == 0) h12 = 12;
+    snprintf(text, sizeof text, "%2d:%02d:%02d", h12, tm.tm_min, tm.tm_sec);   // hour 1..9 gets a blank in front, not a zero
     draw_time(text);
 }
 
