@@ -40,7 +40,8 @@ python tools\set_wifi.py COM9
 
 Run it yourself: it asks for the network name and the hidden password, which the board keeps in its flash
 (`--forget` clears them). After a power cut the clock starts at the firmware's build time and jumps to the right
-time once Wi-Fi connects (it took about 30 s in a test).
+time once Wi-Fi connects (a few seconds to about 30 s in tests). If no NTP answer arrives, the firmware starts the
+request over every 40 s until one does.
 
 The time zone (daylight saving included) is set from this PC:
 
@@ -52,7 +53,7 @@ This builds, flashes, and sets the zone and the time over USB serial straight aw
 only the last part (use the ESP-IDF Python: it has pyserial). Flashing the merged image below erases the saved Wi-Fi
 settings: run `set_wifi.py` again.
 
-Serial commands (115200, USB): `Z<tz>`, `T<epoch>`, `W<ssid><TAB><password>`, `I` (status), `D` (dump the screen).
+Serial commands (115200, USB): `Z<tz>`, `T<epoch>`, `W<ssid><TAB><password>`, `I` (status), `N` (start the NTP request over), `D` (dump the screen).
 
 ## Ready-to-flash image
 
@@ -62,7 +63,7 @@ Any 1.47B board; replace COM9; hold BOOT while pressing RESET if it will not ent
 python -m esptool --chip esp32s3 -p COM9 -b 460800 write_flash 0x0 firmware\imsai_clock_merged_0x0.bin
 ```
 
-SHA-256 `E656356320DFA92D462A596906ED7A2EB5F9912096EF3188BA9C2DEE38FB0187`
+SHA-256 `2B98FFE234FD8866265A433DA9933D90608CF8D7BAE8AFC1CC1800448871080E`
 
 Then run `python tools\set_wifi.py COM9` and `python tools\set_time.py COM9` (time zone).
 

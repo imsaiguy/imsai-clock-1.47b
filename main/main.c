@@ -33,6 +33,8 @@
 #include "freertos/semphr.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include <netdb.h>
+#include <arpa/inet.h>
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_sntp.h"
@@ -591,6 +593,7 @@ static char wifi_ssid[33], wifi_pass[65];
 static const char *wifi_state = "not configured";
 static time_t last_sync = 0;                                       // UTC time of the last NTP sync (0: none since boot)
 static bool wifi_up;                                               // wifi_start() has run
+static bool wifi_ip;                                               // connected and has an IP address
 
 static void nvs_load_wifi(void)
 {
@@ -609,6 +612,41 @@ static void sntp_synced(struct timeval *tv)
     ESP_LOGI(TAG, "NTP synced: %lld s since 1970 UTC", (long long)tv->tv_sec);
 }
 
+static int64_t sntp_kick_us;                                       // when SNTP was last (re)started
+
+static void ntp_probe_task(void *arg)                              // logs whether the NTP server name can be looked up
+{
+    struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_DGRAM }, *res = NULL;
+    int64_t t0 = esp_timer_get_time();
+    int rc = getaddrinfo(NTP_SERVER, "123", &hints, &res);
+    if (rc == 0 && res) {
+        char ip[16];
+        inet_ntop(AF_INET, &((struct sockaddr_in *)res->ai_addr)->sin_addr, ip, sizeof ip);
+        ESP_LOGI(TAG, "NTP: %s resolves to %s (%d ms)", NTP_SERVER, ip, (int)((esp_timer_get_time() - t0) / 1000));
+        freeaddrinfo(res);
+    } else {
+        ESP_LOGW(TAG, "NTP: cannot look up %s (error %d, %d ms)", NTP_SERVER, rc, (int)((esp_timer_get_time() - t0) / 1000));
+    }
+    vTaskDelete(NULL);
+}
+
+static void ntp_start(const char *why)                             // (re)start SNTP from scratch
+{
+    if (esp_sntp_enabled()) esp_sntp_stop();
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, NTP_SERVER);
+    esp_sntp_set_time_sync_notification_cb(sntp_synced);
+    esp_sntp_init();                                               // asks again about once an hour
+    sntp_kick_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "NTP: started (%s)", why);
+    xTaskCreate(ntp_probe_task, "ntp_probe", 4096, NULL, 3, NULL);
+}
+
+static void ntp_watch(void)                                        // main loop: while connected but never synced, start over every 40 s
+{
+    if (!last_sync && wifi_ip && esp_timer_get_time() - sntp_kick_us > 40 * 1000000LL) ntp_start("no answer yet");
+}
+
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -617,6 +655,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (wifi_ssid[0]) {
             wifi_event_sta_disconnected_t *d = data;
             wifi_state = "disconnected, retrying";
+            wifi_ip = false;
             ESP_LOGW(TAG, "WIFI disconnected (reason %d), retrying", d->reason);
             vTaskDelay(pdMS_TO_TICKS(2000));
             esp_wifi_connect();
@@ -625,11 +664,8 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         wifi_state = "connected";
         ip_event_got_ip_t *e = data;
         ESP_LOGI(TAG, "WIFI connected to \"%s\", IP " IPSTR, wifi_ssid, IP2STR(&e->ip_info.ip));
-        if (esp_sntp_enabled()) esp_sntp_stop();
-        esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
-        esp_sntp_setservername(0, NTP_SERVER);
-        esp_sntp_set_time_sync_notification_cb(sntp_synced);
-        esp_sntp_init();                                           // asks again about once an hour
+        wifi_ip = true;
+        ntp_start("got an IP address");
     }
 }
 
@@ -714,6 +750,9 @@ static void poll_serial(void)                                      // called fro
                 nvs_save("pass", wifi_pass);
                 ESP_LOGI(TAG, "WIFI saved network \"%s\" (%s password)", wifi_ssid, wifi_pass[0] ? "with" : "no");
                 if (wifi_up) wifi_apply();
+            } else if (len == 1 && buf[0] == 'N') {                // "N": start the NTP request over now
+                if (wifi_ip) ntp_start("asked over USB");
+                else ESP_LOGW(TAG, "NTP: not connected to Wi-Fi (%s)", wifi_state);
             } else if (len == 1 && buf[0] == 'I') {                // "I": report the last reset and the time
                 time_t t = time(NULL);
                 struct tm tm;
@@ -887,6 +926,7 @@ void app_main(void)
     bool armed = true;                             // one press = one change; re-armed when the button is released
     while (true) {
         poll_serial();
+        ntp_watch();
 
         int64_t now_us = esp_timer_get_time();
         if (gpio_get_level(PIN_BTN) == 0) {
